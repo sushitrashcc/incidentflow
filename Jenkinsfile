@@ -17,6 +17,7 @@ pipeline {
     APP       = 'incidentflow'
     HOST      = 'host.docker.internal'
     LIVE_PORT = '80'
+    ALT_PORT  = '8000'
     TEST_PORT = '8081'
   }
 
@@ -89,7 +90,7 @@ pipeline {
           sh '''
             docker volume create $APP-data >/dev/null
             docker rm -f $APP >/dev/null 2>&1 || true
-            docker run -d --name $APP --restart unless-stopped -p $LIVE_PORT:3000 \
+            docker run -d --name $APP --restart unless-stopped -p $LIVE_PORT:3000 -p $ALT_PORT:3000 \
               -e APP_VERSION=$TAG -e OPS_USER="$OPS_USER" -e OPS_PASSWORD="$OPS_PASSWORD" -e SESSION_SECRET="$SESSION_SECRET" \
               -v $APP-data:/data $APP:$TAG
             for i in $(seq 1 20); do curl -fs http://$HOST:$LIVE_PORT/health && break; sleep 2; done

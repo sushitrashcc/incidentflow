@@ -62,6 +62,14 @@ resource "aws_security_group" "web" {
   }
 
   ingress {
+    description = "Alternate HTTP port for networks that block port 80"
+    from_port   = 8000
+    to_port     = 8000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
     description = "SSH for Ansible"
     from_port   = 22
     to_port     = 22

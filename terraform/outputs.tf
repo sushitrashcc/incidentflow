@@ -7,6 +7,11 @@ output "store_url" {
   value = "http://${aws_eip.web.public_ip}/"
 }
 
+output "store_url_alt" {
+  description = "Same store on port 8000 (for networks that block port 80)"
+  value       = "http://${aws_eip.web.public_ip}:8000/"
+}
+
 output "ops_console_url" {
   value = "http://${aws_eip.web.public_ip}/ops"
 }
