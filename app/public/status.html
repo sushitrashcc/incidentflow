@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cartora service status</title>
+  <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Figtree:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/store.css">
+  <style>
+    .st { max-width: 760px; margin: 28px auto; }
+    .overall { border-radius: var(--r-md); padding: 22px 24px; color: #fff; font: 700 22px/1.2 var(--display); margin-bottom: 16px; }
+    .overall small { display: block; font: 400 14px var(--body); opacity: .85; margin-top: 4px; }
+    .operational { background: var(--leaf); } .degraded { background: #b86e00; } .outage { background: var(--signal); }
+    .svc { display: flex; justify-content: space-between; padding: 13px 0; border-top: 1px solid var(--line); }
+    .svc:first-of-type { border-top: 0; }
+    .pill { font-size: 13px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
+    .pill::before { content: ''; width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
+    .s-operational { color: var(--leaf); } .s-minor { color: #8a6d00; } .s-degraded { color: #b86e00; } .s-outage { color: var(--signal); }
+    .inc { border-left: 4px solid var(--signal); padding: 8px 14px; margin: 10px 0; background: #fff8f7; }
+  </style>
+</head>
+<body>
+  <header class="top"><div class="wrap" style="grid-template-columns:auto 1fr auto">
+    <a class="logo" href="/">cartora<span class="dot"></span></a><span></span><a href="/" style="text-decoration:none;font-weight:600">Back to store</a>
+  </div></header>
+  <main class="wrap st">
+    <div id="overall" class="overall operational">Checking services…</div>
+    <div class="panel" id="incs" hidden><h2>Ongoing incidents</h2><div id="incList"></div></div>
+    <div class="panel" style="margin-top:16px"><h2>Services</h2><div id="svcs"></div></div>
+    <p class="muted" style="font-size:13px" id="upd"></p>
+  </main>
+  <script>
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const label = { operational: 'Operational', minor: 'Minor issue', degraded: 'Degraded', outage: 'Outage' };
+    async function load() {
+      const s = await fetch('/api/status').then((r) => r.json());
+      const o = document.getElementById('overall');
+      o.className = 'overall ' + s.overall;
+      o.innerHTML = { operational: 'All systems operational', degraded: 'Some services are degraded', outage: 'Service disruption in progress' }[s.overall] +
+        '<small>' + (s.overall === 'operational' ? 'Shopping, payments and delivery tracking are working normally.' : 'Our engineers are working on it. Updates appear here automatically.') + '</small>';
+      document.getElementById('svcs').innerHTML = s.services.map((x) => '<div class="svc"><span>' + esc(x.name) + '</span><span class="pill s-' + x.state + '">' + label[x.state] + '</span></div>').join('');
+      document.getElementById('incs').hidden = !s.incidents.length;
+      document.getElementById('incList').innerHTML = s.incidents.map((i) => '<div class="inc"><strong>' + esc(i.title) + '</strong><br><span class="muted" style="font-size:13px">' + esc(i.id) + ' • ' + esc(i.status) + ' • since ' + new Date(i.since).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) + '</span></div>').join('');
+      document.getElementById('upd').textContent = 'Last updated ' + new Date(s.updatedAt).toLocaleTimeString('en-IN') + '. Refreshes every 20 seconds.';
+    }
+    load(); setInterval(load, 20000);
+  </script>
+</body>
+</html>
