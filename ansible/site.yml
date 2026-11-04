@@ -1,0 +1,15 @@
+---
+- name: Configure the IncidentFlow CI/CD server (Docker + Jenkins)
+  hosts: web
+  become: true
+  roles:
+    - common
+    - docker
+    - jenkins
+  post_tasks:
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "Jenkins      : http://{{ ansible_host }}:{{ jenkins_port }}/  (user {{ jenkins_admin_user }}, password in ansible/keys/jenkins-admin-password.txt)"
+          - "Store        : http://{{ ansible_host }}/  (live after the first Jenkins build)"
+          - "Ops console  : http://{{ ansible_host }}/ops  (user {{ ops_user }}, password in ansible/keys/ops-password.txt)"

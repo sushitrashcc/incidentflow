@@ -1,0 +1,54 @@
+jenkins:
+  systemMessage: "IncidentFlow CI/CD server for the Cartora store. Configured by Ansible + Jenkins Configuration as Code."
+  numExecutors: 2
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "{{ jenkins_admin_user }}"
+          password: "{{ jenkins_admin_password }}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: true
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - usernamePassword:
+              scope: GLOBAL
+              id: incidentflow-ops
+              description: IncidentFlow ops console login
+              username: "{{ ops_user }}"
+              password: "{{ ops_password }}"
+          - string:
+              scope: GLOBAL
+              id: incidentflow-session-secret
+              description: Signing key for ops console sessions
+              secret: "{{ session_secret }}"
+unclassified:
+  location:
+    url: "http://{{ ansible_host }}:{{ jenkins_port }}/"
+jobs:
+  - script: |
+      pipelineJob('incidentflow-pipeline') {
+        description('Build, test and deploy IncidentFlow (Cartora store + ops console) to this EC2 instance')
+        properties {
+          pipelineTriggers {
+            triggers {
+              pollSCM { scmpoll_spec('H/2 * * * *') }
+            }
+          }
+        }
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote { url('{{ github_repo }}') }
+                branch('*/{{ github_branch }}')
+              }
+            }
+            scriptPath('Jenkinsfile')
+            lightweight(true)
+          }
+        }
+      }

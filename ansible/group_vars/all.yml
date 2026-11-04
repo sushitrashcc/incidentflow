@@ -1,0 +1,12 @@
+project: incidentflow
+github_repo: https://github.com/sushitrashcc/incidentflow.git
+github_branch: main
+jenkins_port: 8080
+jenkins_home: /opt/jenkins/home
+jenkins_admin_user: admin
+ops_user: admin
+swap_size_mb: 2048
+# Secrets are generated on the first run and kept in ansible/keys/ (git-ignored)
+jenkins_admin_password: "{{ lookup('ansible.builtin.password', 'keys/jenkins-admin-password.txt', length=20, chars=['ascii_letters', 'digits']) }}"
+ops_password: "{{ lookup('ansible.builtin.password', 'keys/ops-password.txt', length=16, chars=['ascii_letters', 'digits']) }}"
+session_secret: "{{ lookup('ansible.builtin.password', 'keys/session-secret.txt', length=48, chars=['ascii_letters', 'digits']) }}"

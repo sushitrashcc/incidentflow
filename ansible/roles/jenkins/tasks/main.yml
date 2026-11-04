@@ -1,0 +1,68 @@
+---
+- name: Create Jenkins directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "1000"
+    group: "1000"
+    mode: "0755"
+  loop:
+    - /opt/jenkins
+    - /opt/jenkins/build
+    - "{{ jenkins_home }}"
+
+- name: Copy Jenkins image build files
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/opt/jenkins/build/{{ item }}"
+    mode: "0644"
+  loop: [Dockerfile, plugins.txt]
+  register: jenkins_build_files
+
+- name: Write Jenkins Configuration as Code
+  ansible.builtin.template:
+    src: casc.yaml.j2
+    dest: "{{ jenkins_home }}/casc.yaml"
+    owner: "1000"
+    group: "1000"
+    mode: "0600"
+  register: jenkins_casc
+
+- name: Build the Jenkins image (Jenkins LTS + Docker CLI + plugins)
+  ansible.builtin.command: docker build -t incidentflow-jenkins:lts /opt/jenkins/build
+  register: jenkins_image
+  changed_when: jenkins_build_files.changed
+
+- name: Find the docker group id on the host
+  ansible.builtin.shell: getent group docker | cut -d':' -f3
+  register: docker_gid
+  changed_when: false
+
+- name: Check for an existing Jenkins container
+  ansible.builtin.command: docker ps -aq --filter name=^/jenkins$
+  register: jenkins_container
+  changed_when: false
+
+- name: Remove old Jenkins container when configuration changed
+  ansible.builtin.command: docker rm -f jenkins
+  when: jenkins_container.stdout != "" and (jenkins_casc.changed or jenkins_build_files.changed)
+
+- name: Start Jenkins
+  ansible.builtin.command: >
+    docker run -d --name jenkins --restart unless-stopped
+    -p {{ jenkins_port }}:8080
+    -v {{ jenkins_home }}:/var/jenkins_home
+    -v /var/run/docker.sock:/var/run/docker.sock
+    --group-add {{ docker_gid.stdout }}
+    --add-host host.docker.internal:host-gateway
+    incidentflow-jenkins:lts
+  when: jenkins_container.stdout == "" or jenkins_casc.changed or jenkins_build_files.changed
+
+- name: Wait for Jenkins to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ jenkins_port }}/login"
+    status_code: 200
+  register: jenkins_up
+  until: jenkins_up.status == 200
+  retries: 40
+  delay: 5
