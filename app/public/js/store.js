@@ -99,9 +99,9 @@
       '<div class="wrap">' +
       '<section class="hero">' +
         '<div class="hero-main">' + marigolds +
-          '<h1>Festive Saver Days are on</h1>' +
+          '<h1>Diwali Dhamaka Sale is live</h1>' +
           '<p>Up to 60% off audio, kitchen and fashion. Extra 10% instant discount with UPI on orders above ₹1,499.</p>' +
-          '<a class="btn primary" href="#/c/electronics">Shop the sale</a>' +
+          '<a class="btn primary" href="#/c/electronics">Shop the Diwali sale</a>' +
         '</div>' +
         '<div class="hero-side">' +
           '<a class="promo a" href="#/c/home"><div><h2>Kitchen upgrade</h2><p>Tri-ply cookware and dinner sets from ₹899</p></div><span>Shop home & kitchen</span></a>' +
