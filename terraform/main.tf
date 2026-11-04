@@ -12,6 +12,10 @@ data "aws_subnets" "public" {
     name   = "default-for-az"
     values = ["true"]
   }
+  filter {
+    name   = "availability-zone"
+    values = [var.availability_zone]
+  }
 }
 
 data "aws_ami" "ubuntu" {

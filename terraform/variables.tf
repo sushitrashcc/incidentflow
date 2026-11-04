@@ -33,3 +33,9 @@ variable "jenkins_ingress_cidrs" {
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
+
+variable "availability_zone" {
+  description = "AZ for the server; us-east-1e does not offer t3 instance types"
+  type        = string
+  default     = "us-east-1a"
+}
