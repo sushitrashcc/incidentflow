@@ -2,7 +2,7 @@ project: incidentflow
 github_repo: https://github.com/sushitrashcc/incidentflow.git
 github_branch: main
 jenkins_port: 8080
-jenkins_home: /opt/jenkins/home
+jenkins_home: /var/jenkins_home   # same path on host and in the container, so docker -v $WORKSPACE works
 jenkins_admin_user: admin
 ops_user: admin
 swap_size_mb: 2048
