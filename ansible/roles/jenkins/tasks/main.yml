@@ -11,6 +11,14 @@
     - /opt/jenkins/build
     - "{{ jenkins_home }}"
 
+- name: Keep Jenkins home owned by the jenkins user (uid 1000)
+  ansible.builtin.file:
+    path: "{{ jenkins_home }}"
+    state: directory
+    owner: "1000"
+    group: "1000"
+    recurse: true
+
 - name: Copy Jenkins image build files
   ansible.builtin.copy:
     src: "{{ item }}"
