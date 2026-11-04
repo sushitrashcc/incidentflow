@@ -1,0 +1,16 @@
+{
+  "name": "incidentflow",
+  "version": "1.0.0",
+  "description": "IncidentFlow: Cloud-Native Incident Management System for e-commerce (Cartora storefront + ops console)",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": { "node": ">=20" },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

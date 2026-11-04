@@ -1,0 +1,16 @@
+# dependencies
+node_modules/
+# terraform state, plans and generated secrets
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/.terraform.lock.hcl.bak
+# keys and generated inventory/secrets
+*.pem
+ansible/keys/
+ansible/inventory.ini
+# misc
+.DS_Store
+*.log
+.vscode/
