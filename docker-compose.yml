@@ -1,0 +1,16 @@
+# Local development: docker compose up --build  ->  http://localhost:8080
+services:
+  incidentflow:
+    build: ./app
+    image: incidentflow:local
+    ports:
+      - "8080:3000"
+    environment:
+      APP_VERSION: local
+      OPS_USER: admin
+      OPS_PASSWORD: incidentflow
+    volumes:
+      - incidentflow-data:/data
+    restart: unless-stopped
+volumes:
+  incidentflow-data:
