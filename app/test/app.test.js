@@ -5,7 +5,7 @@ const { createApp } = require('../app');
 const { suggestSeverity } = require('../src/severity');
 
 async function start(opts = {}) {
-  const app = createApp({ dataFile: null, version: 'test', degradedMs: 5, opsUser: 'admin', opsPassword: 'secret', agent: { intervalMs: 0, verifyMs: 0 }, ...opts });
+  const app = createApp({ dataFile: null, version: 'test', degradedMs: 5, opsUser: 'admin', opsPassword: 'secret', agent: { intervalMs: 0, verifyMs: 0 }, quiet: true, ...opts });
   const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
   const base = 'http://127.0.0.1:' + server.address().port;
   let cookie = '';

@@ -10,11 +10,13 @@ const { SERVICES, SLA, suggestSeverity } = require('./src/severity');
 const { IncidentService, ServiceMonitor } = require('./src/incidents');
 const { RemediationAgent, ONCALL } = require('./src/agent');
 const faults = require('./src/faults');
+const { createLogger } = require('./src/log');
 
 const CHAOS_MODES = ['healthy', 'degraded', 'down'];
 
 function createApp(opts = {}) {
   const version = opts.version || process.env.APP_VERSION || 'dev';
+  const logger = createLogger({ quiet: !!opts.quiet });
   const store = new Store(opts.dataFile !== undefined ? opts.dataFile : process.env.DATA_FILE);
   const incidents = new IncidentService(store);
   const monitor = new ServiceMonitor(incidents, opts.monitor);
@@ -28,7 +30,10 @@ function createApp(opts = {}) {
   for (const key of [...Object.keys(SERVICES), 'payments_backup']) {
     if (!CHAOS_MODES.includes(store.state.chaos[key])) store.state.chaos[key] = 'healthy';
   }
+  incidents.logger = logger;
   const agent = new RemediationAgent({ store, incidents, monitor, opts: opts.agent || (process.env.AGENT_VERIFY_MS ? { verifyMs: Number(process.env.AGENT_VERIFY_MS) } : {}) });
+  agent.logger = logger;
+  agent.watchHealth(); // baseline, so the first change after start-up is reported
 
   const app = express();
   app.disable('x-powered-by');
@@ -68,10 +73,13 @@ function createApp(opts = {}) {
         throw new ServiceError(service, label + ' is not responding (upstream timeout)');
       }
       const out = await fn();
-      monitor.record(service, Date.now() - t0, true);
+      const ms = Date.now() - t0;
+      monitor.record(service, ms, true);
+      if (ms > 1000) logger.throttled('slow:' + service, 3000, 'WARN', service, label + ' slow response: ' + ms + ' ms');
       return out;
     } catch (err) {
       monitor.record(service, Date.now() - t0, false);
+      logger.throttled('err:' + service, 1500, 'ERROR', service, err.message);
       throw err;
     }
   }
@@ -139,6 +147,7 @@ function createApp(opts = {}) {
       let list = await callService('catalog', async () => catalog.listProducts({ category: str(req.query.category, 40), q: str(req.query.q, 80) }));
       if (store.state.faults.catalog === 'search-index-corrupt') {
         list = [];
+        logger.throttled('empty:catalog', 3000, 'ERROR', 'catalog', 'Product listing returned 0 products (search index empty)');
         incidents.create({
           title: 'Catalogue down: search and listings returning no products',
           description: 'Shoppers see an empty store. The product API answers, but every listing and search returns 0 products.',
@@ -225,6 +234,7 @@ function createApp(opts = {}) {
       eta: new Date(Date.now() + 4 * 86400000).toISOString()
     };
     store.state.orders.unshift(order);
+    logger('INFO', 'order', order.id + ' placed: Rs ' + order.total + ' via ' + payment.toUpperCase());
     if (store.state.orders.length > 500) store.state.orders.length = 500;
     store.save();
 
@@ -233,6 +243,7 @@ function createApp(opts = {}) {
       await callService('notifications', async () => null);
     } catch (err) {
       notification = 'failed';
+      logger('ERROR', 'notifications', 'Confirmation email for ' + order.id + ' NOT sent: ' + err.message);
       store.state.pendingEmails = (store.state.pendingEmails || 0) + 1;
       incidents.create({
         title: 'Order confirmation emails not being sent',
@@ -390,7 +401,9 @@ function createApp(opts = {}) {
     if (sc.service === 'payments' && sc.chaos.payments) store.state.paymentRoute = 'primary';
     if (sc.service === 'shipping') store.state.courierRoute = 'primary';
     monitor.reset(sc.service);
-    agent.log(null, 'info', 'Failure injected by ' + req.opsUser + ': ' + sc.title);
+    agent.log(null, 'info', 'Failure injected by ' + req.opsUser + ': ' + sc.title, true);
+    logger('WARN', 'chaos', 'FAILURE INJECTED: ' + sc.title + ' (' + sc.effect + ')');
+    agent.watchHealth();
     store.save();
     res.json({ injected: sc.id, active: store.state.faults });
   });
@@ -400,7 +413,9 @@ function createApp(opts = {}) {
     store.state.paymentRoute = 'primary';
     store.state.courierRoute = 'primary';
     for (const k of Object.keys(SERVICES)) monitor.reset(k);
-    agent.log(null, 'info', 'All failures cleared by ' + req.opsUser);
+    agent.log(null, 'info', 'All failures cleared by ' + req.opsUser, true);
+    logger('OK', 'chaos', 'All injected failures cleared');
+    agent.watchHealth();
     store.save();
     res.json({ cleared: true });
   });
@@ -436,6 +451,7 @@ function createApp(opts = {}) {
   app.locals.store = store;
   app.locals.incidents = incidents;
   app.locals.agent = agent;
+  app.locals.logger = logger;
   return app;
 }
 

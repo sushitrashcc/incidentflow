@@ -45,7 +45,12 @@ class RemediationAgent {
   get enabled() { return this.store.state.agentEnabled; }
   set enabled(v) { this.store.state.agentEnabled = !!v; this.log(null, 'info', 'Agent ' + (v ? 'enabled' : 'paused') + ' by ops'); }
 
-  log(incidentId, kind, text) {
+  log(incidentId, kind, text, quiet) {
+    if (this.logger && !quiet) {
+      const lv = { detect: 'AGENT', action: 'AGENT', verify: 'WARN', fixed: 'OK', escalated: 'ERROR', info: 'INFO' }[kind] || 'INFO';
+      const label = { detect: 'DIAGNOSED: ', action: 'ACTION: ', verify: 'VERIFY FAILED: ', fixed: 'FIXED: ', escalated: 'ESCALATED: ', info: '' }[kind] || '';
+      this.logger(lv, kind === 'info' ? 'ops' : 'agent', label + text);
+    }
     const log = this.store.state.agentLog;
     log.unshift({ at: new Date().toISOString(), incidentId, kind, text });
     if (log.length > 100) log.length = 100;
@@ -192,8 +197,31 @@ class RemediationAgent {
     }
   }
 
+  // Print a line whenever a service changes between RUNNING / DEGRADED / DOWN.
+  watchHealth() {
+    if (!this.logger) return;
+    this.lastHealth = this.lastHealth || {};
+    const names = Object.keys(SERVICES);
+    for (const svc of names) {
+      const mode = this.effectiveMode(svc);
+      const state = (svc === 'catalog' && this.store.state.faults.catalog === 'search-index-corrupt') || mode === 'down' ? 'DOWN' : mode === 'degraded' ? 'DEGRADED' : 'RUNNING';
+      const prev = this.lastHealth[svc];
+      this.lastHealth[svc] = state;
+      if (prev === undefined || prev === state) continue;
+      const name = SERVICES[svc].name;
+      const via = svc === 'payments' && this.store.state.paymentRoute === 'backup' ? ' (via backup gateway)'
+        : svc === 'shipping' && this.store.state.courierRoute === 'backup' ? ' (via backup courier API)' : '';
+      if (state === 'RUNNING') this.logger('OK', svc, name + ' is RUNNING again' + via);
+      else this.logger(state === 'DOWN' ? 'ERROR' : 'WARN', svc, name + ' is ' + state);
+      if (state === 'RUNNING' && names.every((k) => this.lastHealth[k] === 'RUNNING')) {
+        this.logger('OK', 'health', 'All ' + names.length + ' services RUNNING');
+      }
+    }
+  }
+
   tick(now = Date.now()) {
     const st = this.store.state;
+    this.watchHealth();
     if (!st.agentEnabled) return;
     let changed = false;
     for (const inc of this.incidents.list) {

@@ -42,6 +42,9 @@ class IncidentService {
           existing.timeline.push({ at, type: 'repeat', by: 'IncidentFlow', text: 'Seen again (' + existing.occurrences + ' occurrences)' });
         }
         this.store.save();
+        if (this.logger && existing.occurrences % 5 === 0) {
+          this.logger('ALERT', 'incident', existing.id + ' seen again (' + existing.occurrences + 'x): ' + existing.title);
+        }
         return { incident: existing, deduped: true };
       }
     }
@@ -79,6 +82,7 @@ class IncidentService {
     };
     this.list.unshift(incident);
     this.store.save();
+    if (this.logger) this.logger('ALERT', 'incident', incident.id + ' ' + severity + ' OPENED: ' + incident.title + '  [source: ' + source + ']');
     return { incident, deduped: false };
   }
 
@@ -105,6 +109,10 @@ class IncidentService {
       if (patch.status === 'resolved') inc.resolvedAt = at;
       if (from === 'resolved') inc.resolvedAt = null; // reopened
       log('status', 'Status ' + from + ' → ' + patch.status);
+      if (this.logger) {
+        if (patch.status === 'resolved') this.logger('OK', 'incident', inc.id + ' RESOLVED by ' + by + ': ' + inc.title);
+        else this.logger('INFO', 'incident', inc.id + ' status ' + from + ' -> ' + patch.status + ' (' + by + ')');
+      }
     }
     if (patch.note && String(patch.note).trim()) log('note', String(patch.note).trim().slice(0, 1000));
     this.store.save();
