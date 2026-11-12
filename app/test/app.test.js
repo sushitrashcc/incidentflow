@@ -126,67 +126,78 @@ test('latency monitor opens an incident when a service is degraded', async (t) =
   assert.notStrictEqual(status.overall, 'operational');
 });
 
-test('agent fixes a primary gateway outage by failing over, then resolves the incident itself', async (t) => {
+test('agent fixes a known payment gateway outage by failing over, then resolves the incident itself', async (t) => {
   const { app, server, call, login } = await start();
   t.after(() => server.close());
   await login();
-  await call('PUT', '/api/chaos/payments', { mode: 'down' });
+  await call('POST', '/api/faults/pay-gateway-down');
   const failed = await call('POST', '/api/orders', order('upi'));
   assert.strictEqual(failed.status, 502);
   const agent = app.locals.agent;
-  agent.tick();                     // diagnose + attempt 1: failover
+  agent.tick();
   let inc = (await call('GET', '/api/incidents/' + failed.body.incidentRef)).body;
-  assert.strictEqual(inc.agent.status, 'verifying');
   assert.strictEqual(inc.agent.attempts[0].action, 'failover');
-  agent.tick();                     // verify -> healthy -> resolve
+  agent.tick();
   inc = (await call('GET', '/api/incidents/' + failed.body.incidentRef)).body;
   assert.strictEqual(inc.status, 'resolved');
   assert.strictEqual(inc.agent.status, 'fixed');
-  assert.match(inc.resolution, /Auto-remediated/);
-  // Shoppers can pay by UPI again through the backup gateway
   assert.strictEqual((await call('POST', '/api/orders', order('upi'))).status, 201);
-  const ag = (await call('GET', '/api/agent')).body;
-  assert.strictEqual(ag.paymentRoute, 'backup');
-  assert.strictEqual(ag.fixed, 1);
 });
 
-test('agent escalates to the on-call engineer with a ticket when it cannot fix the problem', async (t) => {
+test('a new failure the agent does not know is escalated immediately, without guessing', async (t) => {
   const { app, server, call, login } = await start();
   t.after(() => server.close());
   await login();
-  await call('PUT', '/api/chaos/payments', { mode: 'down' });
-  await call('PUT', '/api/chaos/payments_backup', { mode: 'down' });
-  const failed = await call('POST', '/api/orders', order('card'));
-  const agent = app.locals.agent;
-  for (let i = 0; i < 6; i++) agent.tick();
+  await call('PUT', '/api/chaos/checkout', { mode: 'down' });        // manual break: cause unknown to the agent
+  const failed = await call('POST', '/api/orders', order('cod'));
+  app.locals.agent.tick();
   const inc = (await call('GET', '/api/incidents/' + failed.body.incidentRef)).body;
   assert.strictEqual(inc.agent.status, 'escalated');
-  assert.strictEqual(inc.agent.attempts.length, 2);
-  assert.match(inc.escalation.ticket, /^DEV-\d+$/);
-  assert.strictEqual(inc.escalation.engineer, 'Vaibhav Shelke');
-  assert.notStrictEqual(inc.status, 'resolved');
-  let ag = (await call('GET', '/api/agent')).body;
-  assert.strictEqual(ag.tickets[0].status, 'open');
-  assert.strictEqual(ag.escalated, 1);
-  // The engineer fixes it and resolves; the ticket closes
-  await call('PUT', '/api/chaos/payments', { mode: 'healthy' });
-  await call('PATCH', '/api/incidents/' + inc.id, { status: 'resolved', resolution: 'Provider fixed their API keys' });
-  ag = (await call('GET', '/api/agent')).body;
-  assert.strictEqual(ag.tickets[0].status, 'closed');
+  assert.strictEqual(inc.agent.attempts.length, 0);
+  assert.strictEqual(inc.escalation.engineer, 'Luv Arora');
+  assert.match(inc.escalation.reason, /new failure/);
+  assert.strictEqual((await call('GET', '/api/chaos')).body.checkout, 'down');  // agent did not touch it
 });
 
-test('agent restarts a degraded service and closes the latency incident', async (t) => {
-  const { app, server, call, login } = await start({ monitor: { latencyMs: 20, minSamples: 3 }, degradedMs: 40 });
+test('engineer teaches the agent; the next time the same failure happens the agent fixes it on its own', async (t) => {
+  const { app, server, call, login } = await start();
   t.after(() => server.close());
   await login();
-  await call('PUT', '/api/chaos/catalog', { mode: 'degraded' });
-  for (let i = 0; i < 4; i++) await call('GET', '/api/products');
+  const agent = app.locals.agent;
+  // 1st occurrence: unknown -> escalated
+  await call('PUT', '/api/chaos/checkout', { mode: 'down' });
+  const first = (await call('POST', '/api/orders', order('cod'))).body.incidentRef;
+  agent.tick();
+  assert.strictEqual((await call('GET', '/api/incidents/' + first)).body.agent.status, 'escalated');
+  // engineer fixes it, teaches the agent and resolves
+  await call('PUT', '/api/chaos/checkout', { mode: 'healthy' });
+  const kb = await call('POST', '/api/knowledge', { title: 'Checkout workers hung', service: 'checkout', symptom: 'down', action: 'restart', notes: 'Restarting the checkout worker fixed it', incidentId: first });
+  assert.strictEqual(kb.status, 201);
+  assert.match(kb.body.id, /^KB-\d+$/);
+  assert.strictEqual((await call('POST', '/api/knowledge', { service: 'checkout', symptom: 'down', action: 'failover' })).status, 400); // wrong fix for this service
+  await call('PATCH', '/api/incidents/' + first, { status: 'resolved', resolution: 'Restarted checkout worker' });
+  // 2nd occurrence: the agent now knows what to do
+  await call('PUT', '/api/chaos/checkout', { mode: 'down' });
+  const second = (await call('POST', '/api/orders', order('cod'))).body.incidentRef;
+  assert.notStrictEqual(second, first);
+  agent.tick(); agent.tick();
+  const inc = (await call('GET', '/api/incidents/' + second)).body;
+  assert.strictEqual(inc.agent.status, 'fixed');
+  assert.strictEqual(inc.agent.diagnosis.knowledge, kb.body.id);
+  assert.match(inc.resolution, /knowledge KB-/);
+  assert.strictEqual((await call('POST', '/api/orders', order('cod'))).status, 201);
+  const k = (await call('GET', '/api/knowledge')).body;
+  assert.strictEqual(k.learned[0].timesUsed, 1);
+});
+
+test('customer reports always go to an engineer', async (t) => {
+  const { app, server, call, login } = await start();
+  t.after(() => server.close());
+  await login();
+  const r = await call('POST', '/api/support/report', { title: 'Coupon FESTIVE10 not applying', service: 'checkout' });
   app.locals.agent.tick();
-  app.locals.agent.tick();
-  const list = (await call('GET', '/api/incidents?service=catalog')).body;
-  assert.strictEqual(list[0].status, 'resolved');
-  assert.strictEqual(list[0].agent.status, 'fixed');
-  assert.strictEqual((await call('GET', '/api/chaos')).body.catalog, 'healthy');
+  const inc = (await call('GET', '/api/incidents/' + r.body.ticket)).body;
+  assert.strictEqual(inc.agent.status, 'escalated');
 });
 
 const { SCENARIOS } = require('../src/faults');

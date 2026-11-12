@@ -69,6 +69,7 @@
       nav('#/incidents', 'Incidents', 'list') +
       nav('#/new', 'Declare incident', 'new') +
       nav('#/agent', 'Self-healing agent', 'agent') +
+      nav('#/knowledge', 'Agent knowledge', 'kb') +
       nav('#/services', 'Services & fault injection', 'svc') +
       nav('/status', 'Public status page', '') +
       nav('/', 'Open storefront', '') +
@@ -142,6 +143,7 @@
 
   async function detail(id) {
     const i = await api('/api/incidents/' + id);
+    if (i.agent && i.agent.status === 'escalated' && !i.taught && !KB) KB = await api('/api/knowledge').catch(() => null);
     const idx = STATUSES.indexOf(i.status);
     const sla = meta.sla[i.severity];
     const next = { open: ['acknowledged', 'Acknowledge'], acknowledged: ['investigating', 'Start investigating'], investigating: ['monitoring', 'Fix deployed, monitor'], monitoring: ['resolved', 'Resolve'], resolved: ['investigating', 'Reopen'] }[i.status];
@@ -178,6 +180,14 @@
       } catch (err) { $('#uerr').innerHTML = '<div class="err">' + esc(err.message) + '</div>'; }
     };
     $('#uf').addEventListener('submit', (e) => { e.preventDefault(); save(); });
+    const tf = $('#tf');
+    if (tf) tf.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        const r = await api('/api/knowledge', { method: 'POST', body: JSON.stringify({ ...Object.fromEntries(new FormData(tf)), service: i.service, incidentId: i.id }) });
+        toast('Agent learned ' + r.id + '. Now resolve the incident.'); detail(id);
+      } catch (err) { $('#terr').innerHTML = '<div class="err">' + esc(err.message) + '</div>'; }
+    });
     if (i.agent && (i.agent.status === 'working' || i.agent.status === 'verifying')) {
       refresh = setInterval(() => { if (location.hash === '#/i/' + id && !(document.activeElement && document.activeElement.closest && document.activeElement.closest('form'))) detail(id).catch(() => {}); }, 3000);
     }
@@ -194,14 +204,61 @@
       (a.diagnosis && a.diagnosis.finding ? '<p style="margin:0 0 8px;font-size:13.5px"><b>Diagnostic check:</b> ' + esc(a.diagnosis.finding) + '</p>' : '') +
       (a.attempts.length ? '<ol class="attempts">' + a.attempts.map((x) => '<li><b>' + AN[x.action] + '</b> <span class="res r-' + x.result.replace(/ /g, '-') + '">' + x.result + '</span></li>').join('') + '</ol>' : '') +
       (i.escalation ? '<div class="ticket"><strong>Ticket ' + esc(i.escalation.ticket) + '</strong> assigned to <strong>' + esc(i.escalation.engineer) + '</strong> (' + esc(i.escalation.team) + ' on-call)<br><span class="muted">' + esc(i.escalation.reason) + '</span></div>' : '') +
-      (a.status === 'fixed' ? '<p class="muted" style="margin:6px 0 0">Resolved without an engineer.</p>' : '') + '</div>';
+      (a.diagnosis && a.diagnosis.knowledge ? '<p class="muted" style="margin:6px 0 0">Used learned knowledge <a href="#/knowledge">' + esc(a.diagnosis.knowledge) + '</a>.</p>' : '') +
+      (a.status === 'fixed' ? '<p class="muted" style="margin:6px 0 0">Resolved without an engineer.</p>' : '') + '</div>' + teachCard(i);
+  }
+
+  // Shown on escalated incidents: the engineer records the fix so the agent can apply it next time.
+  let KB = null;
+  function teachCard(i) {
+    if (!i.agent || i.agent.status !== 'escalated' || !meta.services[i.service]) return '';
+    if (i.taught) return '<div class="card teach"><h2>Agent knowledge</h2><p style="margin:0">Learned as <a href="#/knowledge"><b>' + esc(i.taught) + '</b></a>. Next time this happens, the agent fixes it on its own.</p></div>';
+    if (!KB) return '';
+    const sym = i.agent.diagnosis && i.agent.diagnosis.symptom === 'slow' ? 'slow' : 'down';
+    const acts = (KB.allowed[i.service] || ['restart']);
+    return '<div class="card teach"><h2>Teach the agent</h2><p class="muted" style="margin:0 0 10px;font-size:13px">The agent did not know how to fix this. Tell it what worked, and it will fix this failure by itself next time.</p>' +
+      '<div id="terr"></div><form id="tf">' +
+      '<label class="f">Failure name<input name="title" maxlength="140" value="' + esc(i.title) + '"></label>' +
+      '<div class="row2"><label class="f">Service<input value="' + esc(svcName(i.service)) + '" disabled></label>' +
+      '<label class="f">Symptom<select name="symptom"><option value="down"' + (sym === 'down' ? ' selected' : '') + '>Down / failing</option><option value="slow"' + (sym === 'slow' ? ' selected' : '') + '>Slow</option></select></label></div>' +
+      '<label class="f">Fix the agent should apply<select name="action">' + acts.map((x) => '<option value="' + x + '">' + esc(KB.actions[x]) + '</option>').join('') + '</select></label>' +
+      '<label class="f">How you fixed it (notes for the team)<textarea name="notes" rows="2" placeholder="e.g. Checkout workers were hung; restarting them fixed it"></textarea></label>' +
+      '<button class="btn green">Save to agent knowledge</button></form></div>';
+  }
+
+  async function knowledgePage() {
+    const k = await api('/api/knowledge');
+    KB = k;
+    const svcOpts = Object.entries(k.services).map(([v, n]) => '<option value="' + v + '">' + esc(n) + '</option>').join('');
+    shell('kb', '<div class="head"><div><h1>Agent knowledge</h1><span class="muted">What the self-healing agent knows how to fix. Anything not listed here is a new failure: the agent escalates it to an engineer instead of guessing. Engineers add new entries from an escalated incident or below.</span></div></div>' +
+      '<div class="cols"><div style="display:grid;gap:16px">' +
+        '<div class="card"><h2>Learned from engineers (' + k.learned.length + ')</h2>' + (k.learned.length ? '<table><thead><tr><th>ID</th><th>Failure</th><th>Fix</th><th>Used</th><th></th></tr></thead><tbody>' +
+          k.learned.map((e) => '<tr><td class="id">' + esc(e.id) + '</td><td><b>' + esc(e.title) + '</b><div class="src">' + esc(k.services[e.service]) + ' ' + esc(e.symptom) + (e.learnedFrom ? ' \u2022 from ' + esc(e.learnedFrom) : '') + ' \u2022 by ' + esc(e.by) + '</div>' + (e.notes ? '<div class="src">' + esc(e.notes) + '</div>' : '') + '</td><td>' + esc(k.actions[e.action]) + '</td><td>' + (e.timesUsed || 0) + '\u00d7</td><td><button class="btn ghost" style="padding:4px 10px;font-size:12px" data-forget="' + esc(e.id) + '">Remove</button></td></tr>').join('') + '</tbody></table>'
+          : '<div class="empty">Nothing learned yet. Break a service manually on the Services page (an unknown failure), let the agent escalate it, then use "Teach the agent" on the incident.</div>') + '</div>' +
+        '<div class="card"><h2>Built-in knowledge (' + k.builtin.length + ')</h2><table><thead><tr><th>Failure</th><th>Agent tries</th><th>Outcome</th></tr></thead><tbody>' +
+          k.builtin.map((b) => '<tr><td><b>' + esc(b.title) + '</b><div class="src">' + esc(k.services[b.service]) + '</div></td><td>' + b.playbook.map((x, n) => (n + 1) + '. ' + esc(k.actions[x])).join('<br>') + '</td><td>' + (b.fixable ? '<span class="ag ag-ok">Fixes it</span>' : '<span class="ag ag-esc">Escalates</span>') + '</td></tr>').join('') + '</tbody></table></div>' +
+      '</div><div class="card"><h2>Add knowledge</h2><div id="kerr"></div><form id="kf">' +
+        '<label class="f">Failure name<input name="title" required maxlength="140" placeholder="e.g. Shipping label printer queue stuck"></label>' +
+        '<label class="f">Service<select name="service" id="ksvc">' + svcOpts + '</select></label>' +
+        '<label class="f">Symptom<select name="symptom"><option value="down">Down / failing</option><option value="slow">Slow</option></select></label>' +
+        '<label class="f">Fix the agent should apply<select name="action" id="kact"></select></label>' +
+        '<label class="f">Notes<textarea name="notes" rows="3" placeholder="How was it fixed, any checks to do first"></textarea></label>' +
+        '<button class="btn primary">Add to knowledge base</button></form>' +
+        '<p class="muted" style="font-size:12.5px;margin:12px 0 0">One entry per service and symptom: saving again for the same pair updates it.</p></div></div>');
+    const fillActs = () => { const sv = $('#ksvc').value; $('#kact').innerHTML = (k.allowed[sv] || ['restart']).map((x) => '<option value="' + x + '">' + esc(k.actions[x]) + '</option>').join(''); };
+    $('#ksvc').addEventListener('change', fillActs); fillActs();
+    $('#kf').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try { const r = await api('/api/knowledge', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Agent learned ' + r.id); knowledgePage(); }
+      catch (err) { $('#kerr').innerHTML = '<div class="err">' + esc(err.message) + '</div>'; }
+    });
   }
 
   async function agentPage() {
     const ag = await api('/api/agent');
     shell('agent', '<div class="head"><div><h1>Self-healing agent</h1><span class="muted">For every auto-detected incident the agent diagnoses, tries a safe fix, verifies it for ' + ag.verifySeconds + ' s, and resolves it. After ' + ag.maxAttempts + ' failed attempts it stops and escalates to the on-call engineer with a ticket.</span></div>' +
       '<button class="btn ' + (ag.enabled ? 'ghost' : 'green') + '" id="agToggle">' + (ag.enabled ? 'Pause agent' : 'Turn agent on') + '</button></div>' +
-      '<div class="kpis" style="grid-template-columns:repeat(4,minmax(0,1fr))">' + kpi('Fixed automatically', ag.fixed) + kpi('Escalated to engineers', ag.escalated, ag.escalated > 0) + kpi('In progress', ag.working) + kpi('Payment route', ag.paymentRoute) + '</div>' +
+      '<div class="kpis" style="grid-template-columns:repeat(4,minmax(0,1fr))">' + kpi('Fixed automatically', ag.fixed) + kpi('Escalated to engineers', ag.escalated, ag.escalated > 0) + kpi('In progress', ag.working) + kpi('Learned from engineers', ag.learned) + '</div>' +
       '<div class="cols"><div class="card"><h2>Live activity</h2>' + logList(ag.log, 30) + '</div><div style="display:grid;gap:16px">' +
         '<div class="card"><h2>Playbook</h2><table><thead><tr><th>Failure</th><th>Agent tries</th><th>Outcome</th></tr></thead><tbody>' +
           ag.scenarios.map((sc) => '<tr><td>' + esc(sc.title) + '</td><td>' + sc.playbook.map((x, n) => (n + 1) + '. ' + esc(ag.actions[x])).join('<br>') + '</td><td>' +
@@ -259,7 +316,7 @@
         '<div class="svc-row"><span><span class="dot ' + v.mode + '"></span><strong>' + esc(svcName(k)) + '</strong> <span class="muted">\u2022 ' + esc(meta.services[k].team) + (meta.services[k].revenueCritical ? ' \u2022 revenue-critical' : '') + '</span></span>' +
         '<span class="seg" role="group" aria-label="Mode for ' + esc(svcName(k)) + '">' + ['healthy', 'degraded', 'down'].map((m) => '<button data-svc="' + k + '" data-mode="' + m + '" class="' + m + (v.mode === m ? ' on' : '') + '" aria-pressed="' + (v.mode === m) + '">' + m + '</button>').join('') + '</span>' +
         '<div class="meta"><span>' + v.requests + ' requests</span><span>' + v.errors + ' errors</span><span>p95 ' + v.p95 + ' ms (last ' + v.samples + ')</span><span>error rate ' + Math.round(v.errorRate * 100) + '%</span></div></div>' + (k === 'payments' ? backupRow : '')).join('') +
-      '</div><p class="muted" style="font-size:13px">"degraded" models a stuck or leaking worker that a restart clears; "down" models an outage of the provider itself that a restart cannot fix. Detection rules: an incident opens when 30% or more of the last 20 calls fail, when p95 latency goes above 1,200 ms, or immediately when a customer order fails at checkout. Repeated failures are grouped into the same incident.</p>');
+      '</div><p class="muted" style="font-size:13px">Switching a service by hand here is an <b>unknown</b> failure: the agent has no knowledge of it, so it escalates to an engineer until someone teaches it a fix. "degraded" models a stuck or leaking worker that a restart clears; "down" models an outage of the provider itself that a restart cannot fix. Detection rules: an incident opens when 30% or more of the last 20 calls fail, when p95 latency goes above 1,200 ms, or immediately when a customer order fails at checkout. Repeated failures are grouped into the same incident.</p>');
     $('#clearFaults').addEventListener('click', async () => { await api('/api/faults', { method: 'DELETE' }); toast('All failures cleared'); services(); });
     $('#traffic').addEventListener('click', async (e) => {
       const btn = e.currentTarget; btn.disabled = true; btn.textContent = 'Sending traffic\u2026';
@@ -279,6 +336,8 @@
   document.addEventListener('click', async (e) => {
     const go = e.target.closest('[data-go]');
     if (go && !e.target.closest('a')) { location.hash = go.dataset.go; return; }
+    const fg = e.target.closest('[data-forget]');
+    if (fg) { await api('/api/knowledge/' + fg.dataset.forget, { method: 'DELETE' }); toast('Removed ' + fg.dataset.forget); return knowledgePage(); }
     const f = e.target.closest('[data-fault]');
     if (f) {
       await api('/api/faults/' + f.dataset.fault, { method: 'POST' });
@@ -304,6 +363,7 @@
       else if (path === 'new') create();
       else if (path === 'services') await services();
       else if (path === 'agent') await agentPage();
+      else if (path === 'knowledge') await knowledgePage();
       else await dashboard();
     } catch (err) {
       if (user) shell('', '<div class="card empty">' + esc(err.message) + '</div>');

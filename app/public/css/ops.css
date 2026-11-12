@@ -142,3 +142,4 @@ label.f input, label.f select, label.f textarea { display: block; width: 100%; m
 .scen-item strong { font-size: 14px; }
 .scen-item span { font-size: 12.5px; color: var(--muted); }
 .scen-item em { font-style: normal; margin-left: 0; }
+.teach { border-color: #b9e2cb; background: #fbfefc; }

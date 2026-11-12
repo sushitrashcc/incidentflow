@@ -8,7 +8,7 @@ const { Store } = require('./src/store');
 const catalog = require('./src/catalog');
 const { SERVICES, SLA, suggestSeverity } = require('./src/severity');
 const { IncidentService, ServiceMonitor } = require('./src/incidents');
-const { RemediationAgent, ONCALL } = require('./src/agent');
+const { RemediationAgent, ONCALL, ALLOWED } = require('./src/agent');
 const faults = require('./src/faults');
 const { createLogger } = require('./src/log');
 
@@ -418,6 +418,30 @@ function createApp(opts = {}) {
     agent.watchHealth();
     store.save();
     res.json({ cleared: true });
+  });
+
+  // ---------- agent knowledge base ----------
+  app.get('/api/knowledge', requireOps, (req, res) => {
+    res.json({
+      builtin: faults.SCENARIOS.map((s) => ({ id: s.id, title: s.title, service: s.service, effect: s.effect, playbook: s.playbook, fixable: s.fixable })),
+      learned: store.state.knowledge, actions: faults.ACTION_LABELS, allowed: ALLOWED,
+      services: Object.fromEntries(Object.entries(SERVICES).map(([k, v]) => [k, v.name]))
+    });
+  });
+  app.post('/api/knowledge', requireOps, (req, res) => {
+    const b = req.body || {};
+    try {
+      const entry = agent.learn({ title: str(b.title, 140), service: b.service, symptom: b.symptom, action: b.action, notes: str(b.notes, 1000), incidentId: b.incidentId, by: req.opsUser });
+      res.status(201).json(entry);
+    } catch (err) { bad(res, err.message); }
+  });
+  app.delete('/api/knowledge/:id', requireOps, (req, res) => {
+    const before = store.state.knowledge.length;
+    store.state.knowledge = store.state.knowledge.filter((k) => k.id !== req.params.id);
+    if (store.state.knowledge.length === before) return bad(res, 'Not found', 404);
+    logger('WARN', 'knowledge', 'Removed ' + req.params.id + ' from the agent knowledge base (by ' + req.opsUser + ')');
+    store.save();
+    res.json({ removed: req.params.id });
   });
 
   // ---------- self-healing agent ----------
