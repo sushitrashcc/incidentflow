@@ -528,7 +528,9 @@
             "lineWidth": 2,
             "fillOpacity": 10,
             "showPoints": "never"
-          }
+          },
+          "min": 0,
+          "max": 1
         },
         "overrides": []
       },
@@ -575,7 +577,8 @@
             "lineWidth": 2,
             "fillOpacity": 10,
             "showPoints": "never"
-          }
+          },
+          "min": 0
         },
         "overrides": []
       },
