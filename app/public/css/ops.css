@@ -135,3 +135,10 @@ label.f input, label.f select, label.f textarea { display: block; width: 100%; m
 .r-pending { color: var(--muted); }
 .ticket { background: #fff8ee; border: 1px solid #f1d2a8; border-radius: 8px; padding: 10px 12px; font-size: 13.5px; }
 .timeline li.agent::before { background: #6b3fa0; }
+.scen { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.scen-item { text-align: left; border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 10px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.scen-item:hover { border-color: var(--ink-2); }
+.scen-item.on { border-color: var(--p1); background: #fff7f6; }
+.scen-item strong { font-size: 14px; }
+.scen-item span { font-size: 12.5px; color: var(--muted); }
+.scen-item em { font-style: normal; margin-left: 0; }

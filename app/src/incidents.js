@@ -155,7 +155,7 @@ class ServiceMonitor {
   constructor(incidents, opts = {}) {
     this.incidents = incidents;
     this.window = opts.window || 20;
-    this.minSamples = opts.minSamples || 6;
+    this.minSamples = opts.minSamples || 4;
     this.errorRate = opts.errorRate || 0.3;
     this.latencyMs = opts.latencyMs || 1200;
     this.samples = {};

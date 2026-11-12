@@ -188,3 +188,34 @@ test('agent restarts a degraded service and closes the latency incident', async 
   assert.strictEqual(list[0].agent.status, 'fixed');
   assert.strictEqual((await call('GET', '/api/chaos')).body.catalog, 'healthy');
 });
+
+const { SCENARIOS } = require('../src/faults');
+for (const sc of SCENARIOS) {
+  test('scenario "' + sc.title + '" is detected and ' + (sc.fixable ? 'fixed by the agent' : 'escalated to an engineer'), async (t) => {
+    const { app, server, call, login } = await start({ monitor: { latencyMs: 20, minSamples: 3 }, degradedMs: 40 });
+    t.after(() => server.close());
+    await login();
+    const placed = (await call('POST', '/api/orders', order('cod'))).body.id;
+    assert.strictEqual((await call('POST', '/api/faults/' + sc.id)).status, 200);
+    // shopper traffic
+    for (let i = 0; i < 4; i++) await call('GET', '/api/products');
+    for (let i = 0; i < 4; i++) await call('GET', '/api/products/p10' + (1 + i));
+    await call('POST', '/api/orders', order('cod'));
+    await call('POST', '/api/orders', order('upi'));
+    for (let i = 0; i < 4; i++) await call('GET', '/api/orders/' + placed);
+    const opened = (await call('GET', '/api/incidents?status=active')).body;
+    assert.ok(opened.length >= 1, 'an incident should open for ' + sc.id);
+    for (let i = 0; i < 10; i++) app.locals.agent.tick();
+    const all = (await call('GET', '/api/incidents')).body.filter((x) => x.agent);
+    assert.ok(all.length >= 1);
+    if (sc.fixable) {
+      for (const x of all) assert.strictEqual(x.agent.status, 'fixed', sc.id + ': ' + x.title + ' -> ' + x.agent.status);
+      // the store works again
+      assert.strictEqual((await call('POST', '/api/orders', order('upi'))).status, 201);
+      const prods = (await call('GET', '/api/products')).body;
+      assert.ok(prods.length > 0);
+    } else {
+      assert.ok(all.some((x) => x.agent.status === 'escalated' && x.escalation && /^DEV-/.test(x.escalation.ticket)), sc.id + ' should escalate');
+    }
+  });
+}

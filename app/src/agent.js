@@ -6,6 +6,7 @@
 // It only uses safe, reversible actions, tries at most `maxAttempts` times and
 // then hands the incident to the owning team's on-call engineer with a ticket.
 const { SERVICES } = require('./severity');
+const { ACTION_LABELS, byId } = require('./faults');
 
 const ONCALL = {
   Payments: 'Vaibhav Shelke',
@@ -16,11 +17,7 @@ const ONCALL = {
   Logistics: 'Vaibhav Shelke'
 };
 
-const ACTIONS = {
-  failover: 'Fail over payments to the backup gateway',
-  restart: 'Restart the service worker',
-  'restart-payments': 'Restart the payment worker and reset its connection pool'
-};
+const ACTIONS = ACTION_LABELS;
 
 class RemediationAgent {
   constructor({ store, incidents, monitor, opts = {} }) {
@@ -35,6 +32,9 @@ class RemediationAgent {
     if (!Array.isArray(st.agentLog)) st.agentLog = [];
     if (!Array.isArray(st.tickets)) st.tickets = [];
     if (!st.seq.ticket) st.seq.ticket = 1000;
+    if (!st.faults || typeof st.faults !== 'object') st.faults = {};
+    if (!st.courierRoute) st.courierRoute = 'primary';
+    if (typeof st.pendingEmails !== 'number') st.pendingEmails = 0;
     this.timer = null;
     if (opts.intervalMs !== 0) {
       this.timer = setInterval(() => { try { this.tick(); } catch (err) { console.error('agent tick failed', err); } }, opts.intervalMs || 2000);
@@ -55,14 +55,18 @@ class RemediationAgent {
     inc.timeline.push({ at: new Date().toISOString(), type: 'agent', by: 'IncidentFlow Agent', text });
   }
 
+  // What a call to the service experiences right now, taking failovers into account.
+  effectiveMode(service) {
+    const st = this.store.state;
+    if (service === 'payments') return st.paymentRoute === 'backup' ? (st.chaos.payments_backup || 'healthy') : (st.chaos.payments || 'healthy');
+    if (service === 'shipping' && st.courierRoute === 'backup') return st.faults.shipping === 'courier-partner-outage' ? 'down' : 'healthy';
+    return st.chaos[service] || 'healthy';
+  }
+
   // Is the service healthy right now? (synthetic probe, not counted as shopper traffic)
   probe(service) {
-    const chaos = this.store.state.chaos;
-    if (service === 'payments') {
-      const mode = this.store.state.paymentRoute === 'backup' ? chaos.payments_backup : chaos.payments;
-      return mode === 'healthy';
-    }
-    return (chaos[service] || 'healthy') === 'healthy';
+    if (service === 'catalog' && this.store.state.faults.catalog === 'search-index-corrupt') return false;
+    return this.effectiveMode(service) === 'healthy';
   }
 
   diagnose(inc) {
@@ -72,37 +76,62 @@ class RemediationAgent {
     if (fp.endsWith(':latency')) symptom = 'slow';
     const m = fp.match(/^checkout:([a-z_]+)/);
     if (m) service = m[1];
-    const playbook = service === 'payments' ? ['failover', 'restart-payments'] : ['restart', 'restart'];
-    return { service, symptom, playbook };
+    const sc = byId(this.store.state.faults[service]);
+    const playbook = sc ? sc.playbook
+      : service === 'payments' ? ['failover', 'restart-payments'] : ['restart', 'restart'];
+    return { service, symptom, playbook, scenario: sc ? sc.id : null, finding: sc ? sc.diagnostic : null };
   }
 
+  // Apply one remediation action. It only changes the system when it is the right fix
+  // for what is actually wrong; outages outside our control are not fixable.
   act(inc, action, service) {
     const st = this.store.state;
+    const sc = byId(st.faults[service]);
+    const name = SERVICES[service] ? SERVICES[service].name : service;
+    if (this.probe(service)) return name + ' is already healthy again (fixed together with a related incident)';
     if (action === 'failover') {
       if (st.paymentRoute === 'backup') return 'Payments are already routed to the backup gateway';
       st.paymentRoute = 'backup';
       this.monitor.reset('payments');
       return 'Switched payment traffic from the primary to the backup gateway';
     }
-    // Restart: clears transient faults (degraded = leaking/stuck worker), cannot fix hard outages (down).
-    const key = service;
-    const before = st.chaos[key];
-    if (before === 'degraded') st.chaos[key] = 'healthy';
+    if (action === 'courier-failover') {
+      st.courierRoute = 'backup';
+      this.monitor.reset('shipping');
+      return 'Switched order tracking to the backup courier API';
+    }
     this.monitor.reset(service);
-    return 'Restarted the ' + (SERVICES[service] ? SERVICES[service].name : service) + ' worker' +
-      (before === 'down' ? ' (dependency still not responding)' : '');
+    const fixes = sc && sc.fixable && sc.fixedBy === action;
+    if (fixes) {
+      for (const k of Object.keys(sc.chaos)) st.chaos[k] = 'healthy';
+      delete st.faults[service];
+      let extra = '';
+      if (action === 'restart-queue' && st.pendingEmails) { extra = '; resent ' + st.pendingEmails + ' pending confirmation emails'; st.pendingEmails = 0; }
+      return ACTIONS[action] + extra;
+    }
+    if (!sc && (action === 'restart' || action === 'restart-payments') && st.chaos[service] === 'degraded') {
+      st.chaos[service] = 'healthy';
+      return 'Restarted the ' + name + ' worker';
+    }
+    return ACTIONS[action] + ' (done, but ' + (sc ? sc.diagnostic : name + ' still not responding') + ')';
   }
 
   escalate(inc, reason) {
     const team = inc.team;
     const engineer = ONCALL[team] || 'On-call engineer';
-    const id = 'DEV-' + (++this.store.state.seq.ticket);
     const tried = (inc.agent.attempts || []).map((a, i) => (i + 1) + '. ' + ACTIONS[a.action] + ' - ' + a.result).join('; ');
-    const ticket = {
-      id, incidentId: inc.id, title: inc.title, team, engineer, status: 'open', severity: inc.severity,
-      createdAt: new Date().toISOString(), reason, tried: tried || 'No automatic fix available for this type of incident'
-    };
-    this.store.state.tickets.unshift(ticket);
+    // Related incidents on the same service share one open ticket instead of paging twice.
+    let ticket = this.store.state.tickets.find((t) => t.status === 'open' && t.service === inc.service);
+    if (ticket) {
+      ticket.incidentIds = [...new Set([...(ticket.incidentIds || [ticket.incidentId]), inc.id])];
+    } else {
+      ticket = {
+        id: 'DEV-' + (++this.store.state.seq.ticket), incidentId: inc.id, incidentIds: [inc.id], service: inc.service, title: inc.title, team, engineer,
+        status: 'open', severity: inc.severity, createdAt: new Date().toISOString(), reason, tried: tried || 'No automatic fix available for this type of incident'
+      };
+      this.store.state.tickets.unshift(ticket);
+    }
+    const id = ticket.id;
     inc.agent.status = 'escalated';
     inc.escalation = { ticket: id, team, engineer, reason, at: ticket.createdAt };
     inc.assignee = engineer + ' (' + team + ' on-call)';
@@ -118,8 +147,8 @@ class RemediationAgent {
     }
     const what = d.symptom === 'slow' ? 'responding slowly' : 'failing';
     this.note(inc, 'Agent picked up the incident. Diagnosis: ' + (SERVICES[d.service] ? SERVICES[d.service].name : d.service) +
-      ' is ' + what + '. Playbook: ' + d.playbook.map((a) => ACTIONS[a]).join(', then ') + '.');
-    this.log(inc.id, 'detect', inc.id + ': diagnosed ' + (SERVICES[d.service] ? SERVICES[d.service].name : d.service) + ' ' + what);
+      ' is ' + what + (d.finding ? '; diagnostic check: ' + d.finding : '') + '. Playbook: ' + d.playbook.map((a) => ACTIONS[a]).join(', then ') + '.');
+    this.log(inc.id, 'detect', inc.id + ': ' + (SERVICES[d.service] ? SERVICES[d.service].name : d.service) + ' ' + what + (d.finding ? ' (' + d.finding + ')' : ''));
   }
 
   step(inc, now) {
@@ -150,7 +179,7 @@ class RemediationAgent {
           status: 'resolved',
           assignee: 'IncidentFlow Agent',
           rootCause: inc.rootCause || ('Automatically diagnosed: ' + (SERVICES[ag.diagnosis.service] || { name: ag.diagnosis.service }).name + ' ' +
-            (ag.diagnosis.symptom === 'slow' ? 'responding slowly' : 'failing') + '.'),
+            (ag.diagnosis.symptom === 'slow' ? 'responding slowly' : 'failing') + (ag.diagnosis.finding ? ' (' + ag.diagnosis.finding + ')' : '') + '.'),
           resolution: 'Auto-remediated by the IncidentFlow agent: ' + ACTIONS[last.action].toLowerCase() + '. No engineer needed.'
         }, 'IncidentFlow Agent');
         this.log(inc.id, 'fixed', inc.id + ' fixed automatically (' + ACTIONS[last.action].toLowerCase() + ')');
@@ -203,7 +232,8 @@ class RemediationAgent {
   onResolved(inc) {
     if (!inc.escalation) return;
     const t = this.store.state.tickets.find((x) => x.id === inc.escalation.ticket);
-    if (t && t.status !== 'closed') {
+    const stillOpen = t && (t.incidentIds || [t.incidentId]).some((iid) => { const o = this.incidents.get(iid); return o && o.status !== 'resolved'; });
+    if (t && t.status !== 'closed' && !stillOpen) {
       t.status = 'closed';
       t.closedAt = new Date().toISOString();
       this.log(inc.id, 'info', 'Ticket ' + t.id + ' closed: ' + inc.id + ' resolved by ' + (inc.assignee || 'engineer'));
@@ -216,6 +246,7 @@ class RemediationAgent {
     return {
       enabled: this.store.state.agentEnabled,
       paymentRoute: this.store.state.paymentRoute,
+      courierRoute: this.store.state.courierRoute,
       fixed: all.filter((i) => i.agent.status === 'fixed').length,
       escalated: all.filter((i) => i.agent.status === 'escalated').length,
       working: all.filter((i) => i.agent.status === 'working' || i.agent.status === 'verifying').length,

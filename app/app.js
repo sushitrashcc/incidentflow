@@ -9,6 +9,7 @@ const catalog = require('./src/catalog');
 const { SERVICES, SLA, suggestSeverity } = require('./src/severity');
 const { IncidentService, ServiceMonitor } = require('./src/incidents');
 const { RemediationAgent, ONCALL } = require('./src/agent');
+const faults = require('./src/faults');
 
 const CHAOS_MODES = ['healthy', 'degraded', 'down'];
 
@@ -55,12 +56,10 @@ function createApp(opts = {}) {
   // Simulates a call to an internal service, honouring the chaos switches,
   // and reports the outcome to the monitor.
   async function callService(service, fn) {
-    let mode = store.state.chaos[service] || 'healthy';
+    const mode = agent.effectiveMode(service);
     let label = SERVICES[service].name;
-    if (service === 'payments' && store.state.paymentRoute === 'backup') {
-      mode = store.state.chaos.payments_backup || 'healthy';
-      label = 'Backup payment gateway';
-    }
+    if (service === 'payments' && store.state.paymentRoute === 'backup') label = 'Backup payment gateway';
+    if (service === 'shipping' && store.state.courierRoute === 'backup') label = 'Backup courier API';
     const t0 = Date.now();
     try {
       if (mode === 'degraded') await sleep(degradedMs + Math.floor(Math.random() * 300));
@@ -137,7 +136,15 @@ function createApp(opts = {}) {
 
   app.get('/api/products', async (req, res) => {
     try {
-      const list = await callService('catalog', async () => catalog.listProducts({ category: str(req.query.category, 40), q: str(req.query.q, 80) }));
+      let list = await callService('catalog', async () => catalog.listProducts({ category: str(req.query.category, 40), q: str(req.query.q, 80) }));
+      if (store.state.faults.catalog === 'search-index-corrupt') {
+        list = [];
+        incidents.create({
+          title: 'Catalogue down: search and listings returning no products',
+          description: 'Shoppers see an empty store. The product API answers, but every listing and search returns 0 products.',
+          service: 'catalog', source: 'monitor', reporter: 'IncidentFlow Monitor', fingerprint: 'catalog:empty'
+        });
+      }
       res.json(list);
     } catch (err) { bad(res, err.message, 503); }
   });
@@ -226,6 +233,7 @@ function createApp(opts = {}) {
       await callService('notifications', async () => null);
     } catch (err) {
       notification = 'failed';
+      store.state.pendingEmails = (store.state.pendingEmails || 0) + 1;
       incidents.create({
         title: 'Order confirmation emails not being sent',
         description: 'Orders are placed but confirmation email/SMS failed. Last error: ' + err.message,
@@ -242,6 +250,11 @@ function createApp(opts = {}) {
       const tracking = await callService('shipping', async () => ({ courier: 'Cartora Express', stage: 'Packed at warehouse', eta: o.eta }));
       res.json({ id: o.id, status: o.status, total: o.total, items: o.items, createdAt: o.createdAt, tracking });
     } catch (err) {
+      incidents.create({
+        title: 'Order tracking failed for customers',
+        description: 'Shoppers cannot see delivery status. Last error: ' + err.message,
+        service: 'shipping', source: 'monitor', reporter: 'IncidentFlow Monitor', fingerprint: 'shipping:tracking'
+      });
       res.json({ id: o.id, status: o.status, total: o.total, items: o.items, createdAt: o.createdAt, tracking: null, trackingError: 'Tracking is temporarily unavailable' });
     }
   });
@@ -364,9 +377,37 @@ function createApp(opts = {}) {
     res.json(store.state.chaos);
   });
 
+  // ---------- failure scenarios (fault injection) ----------
+  app.get('/api/faults', requireOps, (req, res) => {
+    res.json({ scenarios: faults.SCENARIOS, active: store.state.faults, actions: faults.ACTION_LABELS,
+      paymentRoute: store.state.paymentRoute, courierRoute: store.state.courierRoute });
+  });
+  app.post('/api/faults/:id', requireOps, (req, res) => {
+    const sc = faults.byId(req.params.id);
+    if (!sc) return bad(res, 'Unknown failure scenario', 404);
+    for (const [k, v] of Object.entries(sc.chaos)) store.state.chaos[k] = v;
+    store.state.faults[sc.service] = sc.id;
+    if (sc.service === 'payments' && sc.chaos.payments) store.state.paymentRoute = 'primary';
+    if (sc.service === 'shipping') store.state.courierRoute = 'primary';
+    monitor.reset(sc.service);
+    agent.log(null, 'info', 'Failure injected by ' + req.opsUser + ': ' + sc.title);
+    store.save();
+    res.json({ injected: sc.id, active: store.state.faults });
+  });
+  app.delete('/api/faults', requireOps, (req, res) => {
+    for (const k of Object.keys(store.state.chaos)) store.state.chaos[k] = 'healthy';
+    store.state.faults = {};
+    store.state.paymentRoute = 'primary';
+    store.state.courierRoute = 'primary';
+    for (const k of Object.keys(SERVICES)) monitor.reset(k);
+    agent.log(null, 'info', 'All failures cleared by ' + req.opsUser);
+    store.save();
+    res.json({ cleared: true });
+  });
+
   // ---------- self-healing agent ----------
   app.get('/api/agent', requireOps, (req, res) => {
-    res.json({ ...agent.summary(), maxAttempts: agent.maxAttempts, verifySeconds: Math.round(agent.verifyMs / 1000),
+    res.json({ ...agent.summary(), maxAttempts: agent.maxAttempts, verifySeconds: Math.round(agent.verifyMs / 1000), actions: faults.ACTION_LABELS, scenarios: faults.SCENARIOS,
       oncall: ONCALL, log: store.state.agentLog.slice(0, 40), tickets: store.state.tickets.slice(0, 30) });
   });
   app.put('/api/agent', requireOps, (req, res) => {

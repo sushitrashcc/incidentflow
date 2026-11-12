@@ -187,8 +187,11 @@
   function agentCard(i) {
     if (!i.agent) return '';
     const a = i.agent;
-    const AN = { failover: 'Fail over to backup gateway', restart: 'Restart service worker', 'restart-payments': 'Restart payment worker' };
+    const AN = { failover: 'Fail over to backup payment gateway', 'reset-pool': 'Reset payment connection pool', reindex: 'Rebuild search index',
+      'scale-out': 'Scale out catalogue workers (1 \u2192 3)', restart: 'Restart service worker', 'restart-payments': 'Restart payment worker',
+      'flush-cache': 'Flush session cache', 'restart-queue': 'Restart email queue and resend emails', 'courier-failover': 'Switch to backup courier API' };
     return '<div class="card agent-card"><h2>Self-healing agent ' + agBadge(i) + '</h2>' +
+      (a.diagnosis && a.diagnosis.finding ? '<p style="margin:0 0 8px;font-size:13.5px"><b>Diagnostic check:</b> ' + esc(a.diagnosis.finding) + '</p>' : '') +
       (a.attempts.length ? '<ol class="attempts">' + a.attempts.map((x) => '<li><b>' + AN[x.action] + '</b> <span class="res r-' + x.result.replace(/ /g, '-') + '">' + x.result + '</span></li>').join('') + '</ol>' : '') +
       (i.escalation ? '<div class="ticket"><strong>Ticket ' + esc(i.escalation.ticket) + '</strong> assigned to <strong>' + esc(i.escalation.engineer) + '</strong> (' + esc(i.escalation.team) + ' on-call)<br><span class="muted">' + esc(i.escalation.reason) + '</span></div>' : '') +
       (a.status === 'fixed' ? '<p class="muted" style="margin:6px 0 0">Resolved without an engineer.</p>' : '') + '</div>';
@@ -200,11 +203,10 @@
       '<button class="btn ' + (ag.enabled ? 'ghost' : 'green') + '" id="agToggle">' + (ag.enabled ? 'Pause agent' : 'Turn agent on') + '</button></div>' +
       '<div class="kpis" style="grid-template-columns:repeat(4,minmax(0,1fr))">' + kpi('Fixed automatically', ag.fixed) + kpi('Escalated to engineers', ag.escalated, ag.escalated > 0) + kpi('In progress', ag.working) + kpi('Payment route', ag.paymentRoute) + '</div>' +
       '<div class="cols"><div class="card"><h2>Live activity</h2>' + logList(ag.log, 30) + '</div><div style="display:grid;gap:16px">' +
-        '<div class="card"><h2>Playbook</h2><table><tbody>' +
-          '<tr><td>Payment Gateway failing</td><td>1. Fail over to backup gateway<br>2. Restart payment worker</td></tr>' +
-          '<tr><td>Service slow or failing</td><td>1. Restart service worker<br>2. Restart again</td></tr>' +
-          '<tr><td>Deployment failed</td><td>Needs a code fix: escalate immediately</td></tr>' +
-          '<tr><td>Still unhealthy after 2 tries</td><td>Escalate with ticket, stop acting</td></tr></tbody></table></div>' +
+        '<div class="card"><h2>Playbook</h2><table><thead><tr><th>Failure</th><th>Agent tries</th><th>Outcome</th></tr></thead><tbody>' +
+          ag.scenarios.map((sc) => '<tr><td>' + esc(sc.title) + '</td><td>' + sc.playbook.map((x, n) => (n + 1) + '. ' + esc(ag.actions[x])).join('<br>') + '</td><td>' +
+            (sc.fixable ? '<span class="ag ag-ok">Fixes it</span>' : '<span class="ag ag-esc">Escalates</span>') + '</td></tr>').join('') +
+          '<tr><td>Jenkins deployment failed</td><td>None (needs a code fix)</td><td><span class="ag ag-esc">Escalates</span></td></tr></tbody></table></div>' +
         '<div class="card"><h2>Developer tickets</h2>' + (ag.tickets.length ? '<table><thead><tr><th>Ticket</th><th>Incident</th><th>Assigned to</th><th>Status</th></tr></thead><tbody>' +
           ag.tickets.map((t) => '<tr class="click" data-go="#/i/' + t.incidentId + '"><td class="id">' + esc(t.id) + '</td><td>' + esc(t.incidentId) + '<div class="src">' + esc(t.title) + '</div></td><td>' + esc(t.engineer) + '<div class="src">' + esc(t.team) + ' on-call</div></td><td><span class="st ' + (t.status === 'open' ? 'open' : 'resolved') + '">' + t.status + '</span></td></tr>').join('') + '</tbody></table>' : '<div class="empty">No tickets. Everything so far was fixed automatically.</div>') + '</div>' +
         '<div class="card"><h2>On-call roster</h2><dl class="facts">' + Object.entries(ag.oncall).map(([t, n]) => '<dt>' + esc(t) + '</dt><dd>' + esc(n) + '</dd>').join('') + '</dl></div>' +
@@ -241,21 +243,48 @@
   }
 
   async function services() {
-    const [s, chaos, ag] = await Promise.all([api('/api/stats'), api('/api/chaos'), api('/api/agent')]);
+    const [s, chaos, ag, fl] = await Promise.all([api('/api/stats'), api('/api/chaos'), api('/api/agent'), api('/api/faults')]);
+    const activeIds = Object.values(fl.active);
+    const scenCard = '<div class="card" style="margin-bottom:16px"><div class="head" style="margin-bottom:10px"><div><h2 style="margin:0">Inject an e-commerce failure</h2>' +
+      '<span class="muted" style="font-size:13px">Pick a failure, then send shopper traffic. IncidentFlow detects it and the agent ' + (ag.enabled ? 'tries to fix it on its own.' : 'is paused, so it waits for an engineer.') + '</span></div>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="traffic">Send shopper traffic</button><button class="btn ghost" id="clearFaults">Clear all failures</button></div></div>' +
+      '<div class="scen">' + fl.scenarios.map((sc) => '<button class="scen-item' + (activeIds.includes(sc.id) ? ' on' : '') + '" data-fault="' + sc.id + '">' +
+        '<strong>' + esc(sc.title) + '</strong><span>' + esc(sc.effect) + '</span>' +
+        (sc.fixable ? '<em class="ag ag-ok">Agent can fix</em>' : '<em class="ag ag-esc">Needs an engineer</em>') + (activeIds.includes(sc.id) ? '<em class="ag ag-work">Active</em>' : '') + '</button>').join('') + '</div></div>';
     const backupRow = '<div class="svc-row"><span><span class="dot ' + chaos.payments_backup + '"></span><strong>Backup payment gateway</strong> <span class="muted">\u2022 Payments \u2022 standby provider \u2022 traffic now on <b>' + ag.paymentRoute + '</b></span></span>' +
       '<span class="seg" role="group" aria-label="Mode for backup payment gateway">' + ['healthy', 'degraded', 'down'].map((m) => '<button data-svc="payments_backup" data-mode="' + m + '" class="' + m + (chaos.payments_backup === m ? ' on' : '') + '" aria-pressed="' + (chaos.payments_backup === m) + '">' + m + '</button>').join('') + '</span>' +
       '<div class="meta"><span>Used only when the agent fails payments over from the primary gateway</span></div></div>';
     shell('svc', '<div class="head"><div><h1>Services & fault injection</h1><span class="muted">Switch a service to degraded or down to see IncidentFlow detect the problem from real store traffic.</span></div></div>' +
-      '<div class="card">' + Object.entries(s.services).map(([k, v]) =>
+      scenCard + '<h2 style="margin:8px 0 10px">Individual services</h2><div class="card">' + Object.entries(s.services).map(([k, v]) =>
         '<div class="svc-row"><span><span class="dot ' + v.mode + '"></span><strong>' + esc(svcName(k)) + '</strong> <span class="muted">\u2022 ' + esc(meta.services[k].team) + (meta.services[k].revenueCritical ? ' \u2022 revenue-critical' : '') + '</span></span>' +
         '<span class="seg" role="group" aria-label="Mode for ' + esc(svcName(k)) + '">' + ['healthy', 'degraded', 'down'].map((m) => '<button data-svc="' + k + '" data-mode="' + m + '" class="' + m + (v.mode === m ? ' on' : '') + '" aria-pressed="' + (v.mode === m) + '">' + m + '</button>').join('') + '</span>' +
         '<div class="meta"><span>' + v.requests + ' requests</span><span>' + v.errors + ' errors</span><span>p95 ' + v.p95 + ' ms (last ' + v.samples + ')</span><span>error rate ' + Math.round(v.errorRate * 100) + '%</span></div></div>' + (k === 'payments' ? backupRow : '')).join('') +
       '</div><p class="muted" style="font-size:13px">"degraded" models a stuck or leaking worker that a restart clears; "down" models an outage of the provider itself that a restart cannot fix. Detection rules: an incident opens when 30% or more of the last 20 calls fail, when p95 latency goes above 1,200 ms, or immediately when a customer order fails at checkout. Repeated failures are grouped into the same incident.</p>');
+    $('#clearFaults').addEventListener('click', async () => { await api('/api/faults', { method: 'DELETE' }); toast('All failures cleared'); services(); });
+    $('#traffic').addEventListener('click', async (e) => {
+      const btn = e.currentTarget; btn.disabled = true; btn.textContent = 'Sending traffic\u2026';
+      const cust = { name: 'Demo Shopper', email: 'demo@example.com', phone: '9000012345', address: '4 Anna Salai', city: 'Chennai', pincode: '600002' };
+      const post = (pay) => fetch('/api/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: [{ id: 'p103', qty: 1 }], customer: cust, payment: pay }) }).catch(() => {});
+      const jobs = [];
+      for (let n = 0; n < 6; n++) { jobs.push(fetch('/api/products').catch(() => {})); jobs.push(fetch('/api/products/p10' + (1 + (n % 4))).catch(() => {})); }
+      await Promise.all(jobs);
+      await post('cod'); await post('upi');
+      const orders = await api('/api/orders').catch(() => []);
+      if (orders[0]) for (let n = 0; n < 4; n++) await fetch('/api/orders/' + orders[0].id).catch(() => {});
+      toast('Sent shopper traffic: 12 page views, 2 orders, 4 tracking checks');
+      services();
+    });
   }
 
   document.addEventListener('click', async (e) => {
     const go = e.target.closest('[data-go]');
     if (go && !e.target.closest('a')) { location.hash = go.dataset.go; return; }
+    const f = e.target.closest('[data-fault]');
+    if (f) {
+      await api('/api/faults/' + f.dataset.fault, { method: 'POST' });
+      toast('Injected: ' + f.querySelector('strong').textContent + '. Now send shopper traffic.');
+      return services();
+    }
     const b = e.target.closest('[data-svc]');
     if (b) {
       await api('/api/chaos/' + b.dataset.svc, { method: 'PUT', body: JSON.stringify({ mode: b.dataset.mode }) });
