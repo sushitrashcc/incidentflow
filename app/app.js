@@ -8,6 +8,7 @@ const { Store } = require('./src/store');
 const catalog = require('./src/catalog');
 const { SERVICES, SLA, suggestSeverity } = require('./src/severity');
 const { IncidentService, ServiceMonitor } = require('./src/incidents');
+const { RemediationAgent, ONCALL } = require('./src/agent');
 
 const CHAOS_MODES = ['healthy', 'degraded', 'down'];
 
@@ -23,9 +24,10 @@ function createApp(opts = {}) {
   const startedAt = Date.now();
   const httpTotals = { requests: 0, errors5xx: 0 };
 
-  for (const key of Object.keys(SERVICES)) {
+  for (const key of [...Object.keys(SERVICES), 'payments_backup']) {
     if (!CHAOS_MODES.includes(store.state.chaos[key])) store.state.chaos[key] = 'healthy';
   }
+  const agent = new RemediationAgent({ store, incidents, monitor, opts: opts.agent || (process.env.AGENT_VERIFY_MS ? { verifyMs: Number(process.env.AGENT_VERIFY_MS) } : {}) });
 
   const app = express();
   app.disable('x-powered-by');
@@ -53,13 +55,18 @@ function createApp(opts = {}) {
   // Simulates a call to an internal service, honouring the chaos switches,
   // and reports the outcome to the monitor.
   async function callService(service, fn) {
-    const mode = store.state.chaos[service] || 'healthy';
+    let mode = store.state.chaos[service] || 'healthy';
+    let label = SERVICES[service].name;
+    if (service === 'payments' && store.state.paymentRoute === 'backup') {
+      mode = store.state.chaos.payments_backup || 'healthy';
+      label = 'Backup payment gateway';
+    }
     const t0 = Date.now();
     try {
       if (mode === 'degraded') await sleep(degradedMs + Math.floor(Math.random() * 300));
       if (mode === 'down') {
         await sleep(40);
-        throw new ServiceError(service, SERVICES[service].name + ' is not responding (upstream timeout)');
+        throw new ServiceError(service, label + ' is not responding (upstream timeout)');
       }
       const out = await fn();
       monitor.record(service, Date.now() - t0, true);
@@ -326,6 +333,7 @@ function createApp(opts = {}) {
       resolution: typeof b.resolution === 'string' ? str(b.resolution, 1000) : undefined
     }, req.opsUser);
     if (!inc) return bad(res, 'Incident not found', 404);
+    if (inc.status === 'resolved') agent.onResolved(inc);
     res.json({ ...inc, sla: incidents.slaState(inc) });
   });
 
@@ -333,7 +341,7 @@ function createApp(opts = {}) {
     const health = Object.fromEntries(Object.keys(SERVICES).map((k) => [k, { mode: store.state.chaos[k], ...monitor.summary(k), ...(monitor.totals[k] || { requests: 0, errors: 0 }) }]));
     const today = new Date().toISOString().slice(0, 10);
     const ordersToday = store.state.orders.filter((o) => o.createdAt.startsWith(today));
-    res.json({ ...incidents.stats(), services: health, orders: { today: ordersToday.length, revenueToday: ordersToday.reduce((s, o) => s + o.total, 0), total: store.state.orders.length } });
+    res.json({ ...incidents.stats(), agent: agent.summary(), services: health, orders: { today: ordersToday.length, revenueToday: ordersToday.reduce((s, o) => s + o.total, 0), total: store.state.orders.length } });
   });
 
   app.get('/api/orders', requireOps, (req, res) => res.json(store.state.orders.slice(0, 25)));
@@ -343,17 +351,36 @@ function createApp(opts = {}) {
   app.put('/api/chaos/:service', requireOps, (req, res) => {
     const svc = req.params.service;
     const mode = (req.body || {}).mode;
-    if (!SERVICES[svc]) return bad(res, 'Unknown service', 404);
+    if (!SERVICES[svc] && svc !== 'payments_backup') return bad(res, 'Unknown service', 404);
     if (!CHAOS_MODES.includes(mode)) return bad(res, 'Mode must be healthy, degraded or down');
     const prev = store.state.chaos[svc];
     store.state.chaos[svc] = mode;
-    if (mode === 'healthy' && prev !== 'healthy') {
+    if (mode === 'healthy' && prev !== 'healthy' && SERVICES[svc]) {
       for (const inc of incidents.list.filter((i) => i.service === svc && i.status !== 'resolved' && i.source !== 'customer')) {
         incidents.update(inc.id, { note: SERVICES[svc].name + ' reported healthy again; watch metrics before resolving' }, 'IncidentFlow Monitor');
       }
     }
     store.save();
     res.json(store.state.chaos);
+  });
+
+  // ---------- self-healing agent ----------
+  app.get('/api/agent', requireOps, (req, res) => {
+    res.json({ ...agent.summary(), maxAttempts: agent.maxAttempts, verifySeconds: Math.round(agent.verifyMs / 1000),
+      oncall: ONCALL, log: store.state.agentLog.slice(0, 40), tickets: store.state.tickets.slice(0, 30) });
+  });
+  app.put('/api/agent', requireOps, (req, res) => {
+    agent.enabled = !!(req.body || {}).enabled;
+    store.save();
+    res.json(agent.summary());
+  });
+  app.put('/api/agent/route', requireOps, (req, res) => {
+    const route = (req.body || {}).route;
+    if (!['primary', 'backup'].includes(route)) return bad(res, 'Route must be primary or backup');
+    store.state.paymentRoute = route;
+    agent.log(null, 'info', 'Payment route set to ' + route + ' by ' + req.opsUser);
+    store.save();
+    res.json(agent.summary());
   });
 
   // ---------- pages ----------
@@ -367,6 +394,7 @@ function createApp(opts = {}) {
 
   app.locals.store = store;
   app.locals.incidents = incidents;
+  app.locals.agent = agent;
   return app;
 }
 

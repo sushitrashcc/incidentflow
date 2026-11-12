@@ -172,6 +172,10 @@ class ServiceMonitor {
     this.evaluate(service);
   }
 
+  reset(service) {
+    this.samples[service] = [];
+  }
+
   summary(service) {
     const buf = this.samples[service] || [];
     if (!buf.length) return { samples: 0, errorRate: 0, p95: 0 };
