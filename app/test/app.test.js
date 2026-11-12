@@ -230,3 +230,15 @@ for (const sc of SCENARIOS) {
     }
   });
 }
+
+test('metrics endpoint exposes service health and incident numbers for Prometheus', async (t) => {
+  const { server, call, login } = await start();
+  t.after(() => server.close());
+  await login();
+  let m = (await call('GET', '/metrics')).body;
+  assert.match(m, /incidentflow_service_up\{service="payments",name="Payment Gateway"\} 1/);
+  assert.match(m, /# TYPE incidentflow_orders_total counter/);
+  await call('POST', '/api/faults/search-index-corrupt');
+  m = (await call('GET', '/metrics')).body;
+  assert.match(m, /incidentflow_service_up\{service="catalog",name="Catalog & Search"\} 0/);
+});

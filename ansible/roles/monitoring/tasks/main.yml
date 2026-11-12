@@ -1,0 +1,83 @@
+---
+# Prometheus + Grafana as containers on the same server, on a private Docker network.
+- name: Create monitoring directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /opt/monitoring
+    - /opt/monitoring/grafana
+
+- name: Copy Prometheus configuration
+  ansible.builtin.copy:
+    src: prometheus.yml
+    dest: /opt/monitoring/prometheus.yml
+    mode: "0644"
+  register: prom_config
+
+- name: Copy Grafana provisioning and dashboards
+  ansible.builtin.copy:
+    src: grafana/
+    dest: /opt/monitoring/grafana/
+    mode: "0644"
+    directory_mode: "0755"
+  register: grafana_files
+
+- name: Create the monitoring network
+  ansible.builtin.shell: docker network inspect monitoring >/dev/null 2>&1 || docker network create monitoring
+  register: net
+  changed_when: "'monitoring' in net.stdout"
+
+- name: Check running monitoring containers
+  ansible.builtin.command: docker ps -a --format '{{ '{{' }}.Names{{ '}}' }}'
+  register: containers
+  changed_when: false
+
+- name: Remove Prometheus when its configuration changed
+  ansible.builtin.command: docker rm -f prometheus
+  when: "'prometheus' in containers.stdout_lines and prom_config.changed"
+
+- name: Start Prometheus (internal only, port 9090 on localhost)
+  ansible.builtin.command: >
+    docker run -d --name prometheus --restart unless-stopped
+    --network monitoring
+    --add-host host.docker.internal:host-gateway
+    -p 127.0.0.1:9090:9090
+    -v /opt/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    -v prometheus-data:/prometheus
+    prom/prometheus:{{ prometheus_version }}
+    --config.file=/etc/prometheus/prometheus.yml
+    --storage.tsdb.path=/prometheus
+    --storage.tsdb.retention.time=7d
+  when: "'prometheus' not in containers.stdout_lines or prom_config.changed"
+
+- name: Remove Grafana when its provisioning changed
+  ansible.builtin.command: docker rm -f grafana
+  when: "'grafana' in containers.stdout_lines and grafana_files.changed"
+
+- name: Start Grafana on port {{ grafana_port }}
+  ansible.builtin.command: >
+    docker run -d --name grafana --restart unless-stopped
+    --network monitoring
+    -p {{ grafana_port }}:3000
+    -e GF_SECURITY_ADMIN_USER=admin
+    -e GF_SECURITY_ADMIN_PASSWORD={{ grafana_admin_password }}
+    -e GF_AUTH_ANONYMOUS_ENABLED=true
+    -e GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    -e GF_USERS_ALLOW_SIGN_UP=false
+    -e GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/incidentflow.json
+    -v /opt/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    -v /opt/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    -v grafana-data:/var/lib/grafana
+    grafana/grafana:{{ grafana_version }}
+  when: "'grafana' not in containers.stdout_lines or grafana_files.changed"
+
+- name: Wait for Grafana to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ grafana_port }}/api/health"
+    status_code: 200
+  register: grafana_up
+  until: grafana_up.status == 200
+  retries: 30
+  delay: 3

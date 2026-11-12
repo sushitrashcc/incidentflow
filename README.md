@@ -21,6 +21,12 @@ The whole system is built, tested and deployed on AWS by a Jenkins pipeline, on 
 
 The **Services & fault injection** page switches any service to *degraded* or *down*, so detection can be shown live.
 
+## Monitoring (Prometheus + Grafana)
+
+The app exposes Prometheus metrics at `/metrics` (service health, error rate, p95 latency, open incidents, revenue at risk, agent fixes/escalations, tickets, orders, MTTR/MTTA).
+The Ansible `monitoring` role runs **Prometheus** (scrapes every 5 s, kept on localhost) and **Grafana** on port **3000** with the data source and the
+*IncidentFlow - Store Monitoring* dashboard provisioned automatically. Grafana opens as a read-only viewer; the admin password is in `ansible/keys/grafana-admin-password.txt`.
+
 ## Repository layout
 
 ```

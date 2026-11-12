@@ -23,3 +23,7 @@ output "jenkins_url" {
 output "ssh_command" {
   value = "ssh -i ansible/keys/${var.project}.pem ubuntu@${aws_eip.web.public_ip}"
 }
+
+output "grafana_url" {
+  value = "http://${aws_eip.web.public_ip}:3000/"
+}

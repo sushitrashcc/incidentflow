@@ -1,0 +1,15 @@
+# Prometheus scrapes the IncidentFlow app every 5 seconds.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: incidentflow
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:80']
+        labels:
+          app: incidentflow
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

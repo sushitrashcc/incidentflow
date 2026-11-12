@@ -1,11 +1,12 @@
 ---
-- name: Configure the IncidentFlow CI/CD server (Docker + Jenkins)
+- name: Configure the IncidentFlow CI/CD server (Docker + Jenkins + Prometheus/Grafana)
   hosts: web
   become: true
   roles:
     - common
     - docker
     - jenkins
+    - monitoring
   post_tasks:
     - name: Summary
       ansible.builtin.debug:
@@ -13,3 +14,4 @@
           - "Jenkins      : http://{{ ansible_host }}:{{ jenkins_port }}/  (user {{ jenkins_admin_user }}, password in ansible/keys/jenkins-admin-password.txt)"
           - "Store        : http://{{ ansible_host }}/  (live after the first Jenkins build)"
           - "Ops console  : http://{{ ansible_host }}/ops  (user {{ ops_user }}, password in ansible/keys/ops-password.txt)"
+          - "Grafana      : http://{{ ansible_host }}:{{ grafana_port }}/  (open as viewer, admin password in ansible/keys/grafana-admin-password.txt)"

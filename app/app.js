@@ -119,24 +119,38 @@ function createApp(opts = {}) {
     res.json({ status: 'ok', service: 'incidentflow', version, uptimeSeconds: Math.round((Date.now() - startedAt) / 1000) });
   });
 
+  // Prometheus metrics, scraped every 5 s by Prometheus and shown in Grafana.
   app.get('/metrics', (req, res) => {
     const s = incidents.stats();
-    const lines = [
-      '# HELP incidentflow_http_requests_total HTTP requests served',
-      '# TYPE incidentflow_http_requests_total counter',
-      'incidentflow_http_requests_total ' + httpTotals.requests,
-      'incidentflow_http_5xx_total ' + httpTotals.errors5xx,
-      '# HELP incidentflow_incidents_open Open incidents by severity',
-      '# TYPE incidentflow_incidents_open gauge'
-    ];
-    for (const [sev, n] of Object.entries(s.bySeverity)) lines.push('incidentflow_incidents_open{severity="' + sev + '"} ' + n);
-    lines.push('incidentflow_mttr_minutes ' + s.mttrMinutes, 'incidentflow_revenue_at_risk_inr ' + s.revenueAtRisk);
-    for (const key of Object.keys(SERVICES)) {
-      const m = monitor.summary(key);
-      lines.push('incidentflow_service_p95_ms{service="' + key + '"} ' + m.p95);
-      lines.push('incidentflow_service_error_rate{service="' + key + '"} ' + m.errorRate.toFixed(3));
-    }
-    res.type('text/plain').send(lines.join('\n') + '\n');
+    const ag = agent.summary();
+    const out = [];
+    const metric = (name, type, help, rows) => {
+      out.push('# HELP ' + name + ' ' + help, '# TYPE ' + name + ' ' + type);
+      for (const [labels, value] of rows) out.push(name + (labels ? '{' + labels + '}' : '') + ' ' + value);
+    };
+    const svcRows = (fn) => Object.keys(SERVICES).map((k) => ['service="' + k + '",name="' + SERVICES[k].name + '"', fn(k)]);
+    metric('incidentflow_build_info', 'gauge', 'Running build', [['version="' + version + '"', 1]]);
+    metric('incidentflow_uptime_seconds', 'gauge', 'Seconds since the container started', [['', Math.round((Date.now() - startedAt) / 1000)]]);
+    metric('incidentflow_service_up', 'gauge', 'Service health: 1 running, 0.5 degraded, 0 down', svcRows((k) => {
+      if (!agent.probe(k) && agent.effectiveMode(k) !== 'degraded') return 0;
+      return agent.effectiveMode(k) === 'degraded' ? 0.5 : 1;
+    }));
+    metric('incidentflow_service_error_rate', 'gauge', 'Share of failed calls in the last 20 calls', svcRows((k) => monitor.summary(k).errorRate.toFixed(3)));
+    metric('incidentflow_service_p95_ms', 'gauge', 'p95 latency of the last 20 calls (ms)', svcRows((k) => monitor.summary(k).p95));
+    metric('incidentflow_incidents_open', 'gauge', 'Open incidents by severity', Object.entries(s.bySeverity).map(([sev, n]) => ['severity="' + sev + '"', n]));
+    metric('incidentflow_incidents_total', 'gauge', 'All incidents ever opened', [['', s.total]]);
+    metric('incidentflow_failed_orders_open', 'gauge', 'Failed orders linked to open incidents', [['', s.failedOrders]]);
+    metric('incidentflow_revenue_at_risk_inr', 'gauge', 'Revenue at risk from open incidents (INR)', [['', s.revenueAtRisk]]);
+    metric('incidentflow_mttr_minutes', 'gauge', 'Mean time to resolve (minutes)', [['', s.mttrMinutes]]);
+    metric('incidentflow_mtta_minutes', 'gauge', 'Mean time to acknowledge (minutes)', [['', s.mttaMinutes]]);
+    metric('incidentflow_agent_incidents', 'gauge', 'Incidents handled by the self-healing agent, by outcome',
+      [['outcome="fixed"', ag.fixed], ['outcome="escalated"', ag.escalated], ['outcome="working"', ag.working]]);
+    metric('incidentflow_tickets_open', 'gauge', 'Open developer tickets raised by the agent', [['', ag.openTickets]]);
+    metric('incidentflow_agent_knowledge_entries', 'gauge', 'Fixes engineers have taught the agent', [['', ag.learned]]);
+    metric('incidentflow_orders_total', 'counter', 'Orders placed successfully', [['', store.state.orders.length]]);
+    metric('incidentflow_http_requests_total', 'counter', 'HTTP requests served', [['', httpTotals.requests]]);
+    metric('incidentflow_http_5xx_total', 'counter', 'HTTP responses with status 5xx', [['', httpTotals.errors5xx]]);
+    res.type('text/plain; version=0.0.4').send(out.join('\n') + '\n');
   });
 
   // ---------- storefront API ----------

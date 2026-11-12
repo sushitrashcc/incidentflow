@@ -85,6 +85,14 @@ resource "aws_security_group" "web" {
     cidr_blocks = var.jenkins_ingress_cidrs
   }
 
+  ingress {
+    description = "Grafana dashboards"
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = var.jenkins_ingress_cidrs
+  }
+
   egress {
     description = "All outbound"
     from_port   = 0
